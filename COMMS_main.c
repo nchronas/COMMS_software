@@ -87,7 +87,23 @@ void *mainThread(void *arg0)
     device_init();
     init_parameters();
 
+    //sleep(10);
+
+   // uint8_t test_packet[] = { 0x07, 0x02, 0x01, 0x11, 0x02, 0xBC, 0x80 };
+   // for(uint8_t temp_i = 0; temp_i < 100; temp_i++) {
+   //     GPIO_write(PQ9_EN, 1);
+   //     UART_writePolling(uart_pq9_bus, test_packet, 7);
+        //UART_write(uart_pq9_bus, test_packet, 7);
+   //     GPIO_write(PQ9_EN, 0);
+   //     usleep(500000);
+   // }
+
+    uint16_t size;
+    uint8_t buf[4];
+
     start_flag = true;
+
+    uint32_t sen_loop = 100000;
 
     /* Loop forever echoing */
     while (1) {
@@ -100,7 +116,8 @@ void *mainThread(void *arg0)
         update_device(COMMS_ADC_DEV_ID);
         usleep(1);
 
-        usleep(100);
+        get_parameter(SBSYS_sensor_loop_param_id, &sen_loop, buf, &size);
+        usleep(sen_loop);
 
     }
 }
