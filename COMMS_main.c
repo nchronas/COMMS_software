@@ -80,7 +80,6 @@ void *mainThread(void *arg0)
     /* Turn on user LED */
     GPIO_write(PQ9_EN, 0);
 
-
     /*ECSS services start*/
     pkt_pool_INIT();
     OSAL_init();
@@ -89,14 +88,25 @@ void *mainThread(void *arg0)
 
     //sleep(10);
 
-   // uint8_t test_packet[] = { 0x07, 0x02, 0x01, 0x11, 0x02, 0xBC, 0x80 };
-   // for(uint8_t temp_i = 0; temp_i < 100; temp_i++) {
-   //     GPIO_write(PQ9_EN, 1);
-   //     UART_writePolling(uart_pq9_bus, test_packet, 7);
-        //UART_write(uart_pq9_bus, test_packet, 7);
-   //     GPIO_write(PQ9_EN, 0);
-   //     usleep(500000);
-   // }
+    pq_rx_addr_cnt = 0;
+    pq_rx_byte_cnt = 0;
+
+    uint8_t test_packet[] = { 0x07, 0x04, 0x01, 0x00, 0x00, 0x11, 0x01, 0x64, 0x19 };
+//    for(uint16_t temp_i = 0; temp_i < 1000; temp_i++) {
+//        GPIO_write(PQ9_EN, 1);
+//        UART_writePolling(uart_pq9_bus, test_packet, 9);
+//        //UART_write(uart_pq9_bus, test_packet, 7);
+//        GPIO_write(PQ9_EN, 0);
+//        usleep(500000);
+//
+//        //usleep(1000);
+//        sprintf(msg,"COMMS Received: %d, %d\n", pq_rx_addr_cnt, pq_rx_byte_cnt);
+//        UART_write(uart_dbg_bus, msg, strlen(msg));
+//    }
+//
+//    sprintf(msg,"Received: %d, %d\n", pq_rx_addr_cnt, pq_rx_byte_cnt);
+//    UART_write(uart_dbg_bus, msg, strlen(msg));
+
 
     uint16_t size;
     uint8_t buf[4];
@@ -118,6 +128,9 @@ void *mainThread(void *arg0)
 
         get_parameter(SBSYS_sensor_loop_param_id, &sen_loop, buf, &size);
         usleep(sen_loop);
+
+        sprintf(msg,"COMMS Received: %d, %d\n", pq_rx_addr_cnt, pq_rx_byte_cnt);
+        UART_write(uart_dbg_bus, msg, strlen(msg));
 
     }
 }
@@ -164,19 +177,119 @@ char msg[100];
 /*  ======== senThread ========
  *  This a dbg thread for outputing sensor readings
  */
+
+#define HLDLC_START_FLAG        0x7E
+#define HLDLC_CONTROL_FLAG      0x7D
+#define HLDLC_STOP_FLAG         0x7C
+
+void HLDLC_deframe(uint8_t *buf_in,
+                              uint8_t *buf_out,
+                              const uint16_t size_in,
+                              uint16_t *size_out) {
+
+
+    uint16_t cnt = 0;
+
+    for(uint16_t i = 0; i < size_in; i++) {
+
+        uint8_t c = buf_in[i];
+
+        if(c == HLDLC_START_FLAG) {
+            cnt = 0;
+        } else if(c == HLDLC_STOP_FLAG) {
+            *size_out = cnt;
+            return ;
+        } else if(c == HLDLC_CONTROL_FLAG) {
+            i++;
+            c = buf_in[i];
+
+            if(c == 0x5E) {
+              buf_out[cnt++] = 0x7E;
+            } else if(c == 0x5D) {
+              buf_out[cnt++] = 0x7D;
+            } else if(c== 0x5C) {
+              buf_out[cnt++] = 0x7C;
+            } else {
+              return ;
+            }
+        } else {
+            buf_out[cnt++] = c;
+        }
+
+    }
+    return ;
+}
+
+uint8_t tx_count, tx_size, tx_buf[255];
+
 void *senThread(void *arg0)
 {
-
 
     sprintf(msg, "Reset\n");
     UART_write(uart_dbg_bus, msg, strlen(msg));
 
-    sleep(1);
+    while(!start_flag) {
+        sleep(1);
+    }
+
+    bool ctrl_flag, strt_flag = false;
 
     /* Loop forever */
     while (1) {
 
-      sleep(1);
+        uint8_t resp54[3];
+        uint8_t res;
+
+        usleep(10);
+
+        res = UART_read(uart_dbg_bus, resp54, 1);
+              if(res > 0) {
+                if(resp54[0] == HLDLC_START_FLAG) {
+                  strt_flag = true;
+
+                } else if(resp54[0] == HLDLC_CONTROL_FLAG) {
+                  ctrl_flag = true;
+                } else if(strt_flag) {
+                   strt_flag = false;
+                   tx_buf[0] = resp54[0];
+                   tx_count = 1;
+                } else if(ctrl_flag) {
+                   ctrl_flag = false;
+                   if(resp54[0] == 0x5D) {
+                     tx_buf[tx_count] = 0x7D;
+                     tx_count++;
+                   } else if(resp54[0] == 0x5E) {
+                     tx_buf[tx_count] = 0x7E;
+                     tx_count++;
+                   }
+                } else if(tx_count == 1) {
+                  tx_buf[tx_count] = resp54[0];
+                  tx_size = resp54[0] + 5;
+                  tx_count++;
+                } else if(tx_count > 0 && tx_count < tx_size - 1) {
+                  tx_buf[tx_count] = resp54[0];
+                  tx_count++;
+                } else if(tx_count > 0 && tx_count == tx_size - 1) {
+                  tx_buf[tx_count] = resp54[0];
+                  tx_count++;
+
+                  {
+                    pq9_pkt *pkt;
+
+                    pkt = get_pkt(tx_count);
+
+                    bool res_unpack_PQ = unpack_PQ9_BUS(tx_buf,
+                                                        tx_count,
+                                                        pkt);
+                    pkt->dest_id &= 0x7F;
+                    if(res_unpack_PQ == true) {
+                        queuePush(pkt, RF_POOL_ID);
+                    } else {
+                      free_pkt(pkt);
+                    }
+                  }
+                }
+              }
 
     }
 
